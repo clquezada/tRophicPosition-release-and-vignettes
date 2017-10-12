@@ -1,0 +1,134 @@
+---
+title: 'tRophicPosition two baselines, full Bayesian model example: differences among
+  Roach size classes'
+author: "Claudio Quezada-Romegialli & Chris Harrod"
+date: "October 5 2017"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+
+In this vignette we show how to calculate trophic position with a two baselines, full Bayesian model. We will use a dataset compiled by Chris Harrod based on the roach [*Rutilus rutilus*](http://www.fishbase.org/summary/Rutilus-rutilus.html) from Lough Neagh (54.63 N, 6.41 W), Northern Ireland, UK.
+
+# Introduction
+
+The roach is a cyprinid freshwater-brackish benthopelagic fish, common to most of Europe and western Asia [http://www.fishbase.org/summary/Rutilus-rutilus.html](http://www.fishbase.org/summary/Rutilus-rutilus.html). Larvae and juveniles are typically pelagic, consuming zooplankton, with a switch to more benthic diets as they grow, including plant material and detritus. The dataset included here examines if a consumer shows an ontogenetic shift in their trophic position, studying how TP varies across different size classes.
+
+## Installing tRophicPosition
+
+First of all, you need to install [JAGS](http://mcmc-jags.sourceforge.net/) for your platform, and then install the stable version of `tRophicPosition` from [CRAN](https://CRAN.R-project.org/package=tRophicPosition):
+
+```{r eval = FALSE}
+install.packages("tRophicPosition")
+```
+
+After that, you have to load the package with:
+
+```{r}
+library(tRophicPosition)
+```
+
+# Roach two baselines, full Bayesian model example
+
+We start by loading the dataset into R. As the other examples, we have included the dataset for convenience:
+
+```{r}
+data("Roach")
+
+# Check its structure:
+dplyr::tbl_df(Roach)
+
+summariseIsotopeData(Roach, grouping = c("FG", "Size.class"))
+```
+
+The `Roach` dataset is organised with the following columns:
+
+ * `Taxon` a factor with 5 levels, with the common name of each baseline species and Roach;
+ * `FG` a factor with 3 leves, each representing three different functional groups: `Benthic_BL` (bith, theodoxus and valvata), `Pelagic_BL` (zebra mussel) and `Roach` (Consumer);
+ *  `Fork.length` a numerical variable, with fork length of roach in mm;
+ *  `Size.class` an ordered factor with 10 levels, each representing deciles of fork length of roach; and
+ *  `d13C` and `d15N` are numerical variables, representing $\delta^{13}$C and $\delta^{15}$N values respectively.
+ 
+As usual, we will extract $\delta^{13}$C and $\delta^{15}$N isotope values for each size class of roach as a putative consumer, using `Benthic_BL` and `Pelagil_BL` as baselines for each:
+
+```{r}
+# First we will get trophic discriminator factors from bibliography and save them
+# into TDF_McCutchan
+TDF_McCutchan <- TDF(author = "McCutchan")
+
+# Then we will extract the isotope data for each of the roach size classes,
+# and using the values from Post (2002) selected above
+RoachList <- extractIsotopeData(Roach,
+                                b1 = "Pelagic_BL", b2 = "Benthic_BL",
+                                baselineColumn = "FG",
+                                speciesColumn = "Size.class",
+                                deltaC = TDF_McCutchan$deltaC,
+                                deltaN = TDF_McCutchan$deltaN)
+
+# Also we are interested in calculating TP for the whole roach population.
+# To do so, we will use the function loadIsotopeData, indicating the consumer we want
+# to extract (in this case roach), whose values will be selected from the Taxon column.
+RoachList$Roach <- loadIsotopeData(Roach, species = "Roach", speciesColumn = "Taxon",
+                                   b1 = "Pelagic_BL", b2 = "Benthic_BL",
+                                   baselineColumn = "FG",
+                                   deltaC = TDF_McCutchan$deltaC,
+                                   deltaN = TDF_McCutchan$deltaN)
+```
+
+With the above function (`extractIsotopeData()`) we extracted each `d13C` and `d15N` observations of roach grouped by fork length deciles, using two baselines (baseline 1: `Pelagic_BL` functionl group; baseline 2: `Benthic_BL` functional group) and using trophic discrimination factors (TDFs), based on the compilation of McCutchan et al. (2003). Also, we extracted all the roach isotope values, in order to calculate the TP for the whole population.
+
+We could check how looks like each extracted data set, or look at a numerical summary of each putative consumer. Both approaches can be done using a `for` loop:
+
+```{r, eval = FALSE}
+for (consumer in RoachList) {
+  plot(consumer)
+  # We have to explicitly print the summary, as automatic printing is turned off
+  print(summary(consumer))
+}
+```
+
+Now we will calculate the trophic position for each of the roach size sub-groups.
+
+```{r}
+# First we create a cluster with the cores available
+cluster <- parallel::makePSOCKcluster(parallel::detectCores())
+
+# Then we run the model in parallel, nested in system.time() 
+# in order to know how much time it takes to finish calculations
+system.time(Roach_TPmodels <- parallel::parLapply(cluster,
+                                                    RoachList,
+                                                    multiModelTP,
+                                                    adapt = 20000,
+                                                    n.iter = 20000,
+                                                    burnin = 20000,
+                                                    n.chains = 5,
+                                                    model = "twoBaselinesFull"))
+# And at the end we stop the cluster
+parallel::stopCluster(cluster)
+```
+
+We now analyse the posterior trophic position. As we saved results into `Roach_TPmodels`, we have to get the data from it. We use the function `fromParallelTP()` to get the summary:
+
+```{r, fig.width = 8, fig.height = 5}
+ggplot_df <- fromParallelTP(Roach_TPmodels, get = "summary")
+
+# Next we create a new variable called "group", which will be a factor
+ggplot_df$group <- factor(c(rep("size_classes", 10), "whole_pop"))
+
+# And manually we write the labels of each size classes plus the whole pop
+labels <- c("45-70", "78-92", "99-120", "122-137", "151-165", "171-195",
+            "197-217", "221-242", "247-263", "275-295", "Whole\npopulation")
+
+# And finally we use the groups and labels from above, and
+# plot both TP and alpha using a manual colour scheme
+credibilityIntervals(ggplot_df, xlab = "Roach size classes (mm)",
+                     group_by = ggplot_df$group,
+                     scale_colour_manual = c("grey50", "#4387BB"),
+                     labels = labels)
+```
+
+
+## References
+
+1. McCutchan, J.H., Lewis, W.M., Kendall, C. & McGrath, C.C. (2003). Variation in trophic shift for stable isotope ratios of carbon, nitrogen, and sulfur. Oikos, 102, 378-390.
